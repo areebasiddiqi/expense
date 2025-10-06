@@ -1,0 +1,144 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Xero Token Exchange Test</title>
+    <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+</head>
+<body>
+    <h1>Xero Token Exchange Test</h1>
+    <div id="result"></div>
+    
+    <script>
+        // Extract parameters from current URL
+        const params = new URLSearchParams(window.location.search);
+        const code = params.get('code') || 'phY1t5FxEuc0AlL3Ap6RWR1kQM4y95afg-146-8373w';
+        const redirectUri = 'http://localhost:5173/admin/xero-callback';
+        
+        console.log('Testing with code:', code.substring(0, 10) + '...');
+        
+        // Your Supabase config (replace with actual values)
+        const supabaseUrl = 'https://oqegcpjvlilofaebnvjb.supabase.co';
+        const supabaseKey = 'your-anon-key'; // Replace with your actual anon key
+        
+        const supabase = window.supabase.createClient(supabaseUrl, supabaseKey);
+        
+        async function testTokenExchange() {
+            try {
+                document.getElementById('result').innerHTML = '<p>Testing token exchange...</p>';
+                
+                // First, get Xero settings from database
+                const { data: xeroSettings, error: settingsError } = await supabase
+                    .from('xero_settings')
+                    .select('*')
+                    .maybeSingle();
+                
+                if (settingsError) {
+                    throw new Error('Database error: ' + settingsError.message);
+                }
+                
+                if (!xeroSettings || !xeroSettings.client_id || !xeroSettings.client_secret) {
+                    throw new Error('Xero settings not configured');
+                }
+                
+                console.log('Xero settings found:', {
+                    has_client_id: !!xeroSettings.client_id,
+                    has_client_secret: !!xeroSettings.client_secret
+                });
+                
+                // Exchange authorization code for tokens (direct to Xero)
+                const tokenUrl = 'https://identity.xero.com/connect/token';
+                const credentials = btoa(`${xeroSettings.client_id}:${xeroSettings.client_secret}`);
+                
+                const tokenResponse = await fetch(tokenUrl, {
+                    method: 'POST',
+                    headers: {
+                        'Authorization': `Basic ${credentials}`,
+                        'Content-Type': 'application/x-www-form-urlencoded',
+                    },
+                    body: new URLSearchParams({
+                        grant_type: 'authorization_code',
+                        code: code,
+                        redirect_uri: redirectUri,
+                    }),
+                });
+                
+                if (!tokenResponse.ok) {
+                    const errorText = await tokenResponse.text();
+                    throw new Error(`Token exchange failed: ${errorText}`);
+                }
+                
+                const tokenData = await tokenResponse.json();
+                console.log('Token data received:', {
+                    has_access_token: !!tokenData.access_token,
+                    has_refresh_token: !!tokenData.refresh_token,
+                    expires_in: tokenData.expires_in
+                });
+                
+                if (!tokenData.refresh_token) {
+                    throw new Error('No refresh token received. Make sure offline_access scope is enabled.');
+                }
+                
+                // Get Xero connections
+                const connectionsResponse = await fetch('https://api.xero.com/connections', {
+                    headers: {
+                        'Authorization': `Bearer ${tokenData.access_token}`,
+                        'Content-Type': 'application/json',
+                    },
+                });
+                
+                if (!connectionsResponse.ok) {
+                    const errorText = await connectionsResponse.text();
+                    throw new Error(`Connections fetch failed: ${errorText}`);
+                }
+                
+                const connections = await connectionsResponse.json();
+                console.log('Connections received:', connections.length);
+                
+                if (connections.length === 0) {
+                    throw new Error('No Xero organizations found');
+                }
+                
+                const tenantId = connections[0].tenantId;
+                
+                // Update database with tokens
+                const { error: updateError } = await supabase
+                    .from('xero_settings')
+                    .update({
+                        refresh_token: tokenData.refresh_token,
+                        tenant_id: tenantId,
+                        is_connected: true,
+                        updated_at: new Date().toISOString(),
+                    })
+                    .eq('id', xeroSettings.id);
+                
+                if (updateError) {
+                    throw new Error(`Failed to save tokens: ${updateError.message}`);
+                }
+                
+                document.getElementById('result').innerHTML = `
+                    <div style="color: green;">
+                        <h2>✅ Success!</h2>
+                        <p><strong>Tenant ID:</strong> ${tenantId}</p>
+                        <p><strong>Organization:</strong> ${connections[0].tenantName}</p>
+                        <p><strong>Refresh Token:</strong> Saved to database</p>
+                        <p><a href="http://localhost:5173/?tab=settings">Go to Settings</a></p>
+                    </div>
+                `;
+                
+            } catch (error) {
+                console.error('Test failed:', error);
+                document.getElementById('result').innerHTML = `
+                    <div style="color: red;">
+                        <h2>❌ Error</h2>
+                        <p>${error.message}</p>
+                        <p>Check browser console for details</p>
+                    </div>
+                `;
+            }
+        }
+        
+        // Run the test
+        testTokenExchange();
+    </script>
+</body>
+</html>
